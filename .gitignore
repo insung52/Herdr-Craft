@@ -1,0 +1,15 @@
+# Only the Minecraft design is tracked; everything else in the Herdr config stays out.
+/*
+!/.gitignore
+!/layouts/
+/layouts/*
+!/layouts/minecraft.json
+!/layouts/minecraft.svg
+!/themes/
+/themes/*
+!/themes/minecraft.json
+!/mods/
+/mods/*
+!/mods/mc-*/
+gpui-kit.d.ts
+__pycache__/
