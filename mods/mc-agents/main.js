@@ -29,7 +29,7 @@ const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
 // Each agent keeps one cat coat everywhere (list, tabs, pane header, yard): picked from its address.
 const COATS = ["ginger", "tuxedo", "black", "calico", "siamese", "gray", "white"];
 const coatOf = (addr) => { let h = 0; for (const ch of String(addr ?? "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return COATS[h % COATS.length]; };
-const CATS = "mods/mc-status/art/cats5";
+const CATS = "mods/mc-status/art/cats8";
 
 // To the rail (on macOS wide enough for the traffic lights), or back to the width it had.
 function toggleSidebar() {

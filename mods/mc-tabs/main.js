@@ -35,7 +35,7 @@ const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").repla
 // Each agent keeps one cat coat everywhere (list, tabs, pane header, yard): picked from its address.
 const COATS = ["ginger", "tuxedo", "black", "calico", "siamese", "gray", "white"];
 const coatOf = (addr) => { let h = 0; for (const ch of String(addr ?? "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return COATS[h % COATS.length]; };
-const CATS = "mods/mc-status/art/cats5";
+const CATS = "mods/mc-status/art/cats8";
 
 // A tab Herdr named (unnamed, or after its program) follows its agent's live
 // title, as the agents list does; a name the person gave stays.

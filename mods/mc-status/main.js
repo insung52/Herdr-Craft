@@ -8,11 +8,22 @@
 //    only touches tabs with no agent, skips running sessions, and a mutex stops overlaps).
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { META } from "./art/cats5/meta.js";
+import { META } from "./art/cats8/meta.js";
 import { spaces, agents, terminals, theme, run, window, keys, exec, hc, appHome, readTextFile, writeTextFile, notify, checking, layout, settings, shared, focused } from "herdr";
 
 const PS = "pwsh";
 const SNAPSHOT_MS = 120000;
+// The restore/restart scripts live on the Windows PC. A Herdr window on another OS (the MacBook)
+// runs them on that PC through its machine entry instead of locally.
+const IS_WIN = /^[A-Za-z]:/.test(appHome());
+const PC = "desktop";
+function psRun(name, scriptArgs, opts) {
+  if (IS_WIN) return exec(PS, ["-NoProfile", "-File", `${appHome()}/data/claude-restore/${name}`, ...scriptArgs], opts);
+  // this computer's own restore on a Mac: the python twin of herdr-restore.ps1
+  if (name === "herdr-restore.ps1") return exec("/bin/zsh", ["-lc", `python3 "${appHome()}/data/claude-restore/herdr-restore.py" --mode ${scriptArgs[1]}`], opts);
+  const a = scriptArgs.map((x) => (/^[\w.-]+$/.test(String(x)) ? String(x) : `"${String(x).replace(/"/g, "")}"`)).join(" ");
+  return exec(PS, ["-NoProfile", "-Command", `& ~\\.config\\herdr-app\\data\\claude-restore\\${name} ${a}`], { ...opts, on: PC });
+}
 const script = () => `${appHome()}/data/claude-restore/herdr-restore.ps1`;
 // ── restart outdated sessions (per machine) — logic copied unchanged from my-status ──
 const restartScript = () => `${appHome()}/data/claude-restore/herdr-restart.ps1`;
@@ -26,9 +37,10 @@ async function installedVersion(machine) {
 }
 
 async function runRestartScript(machine) {
-  const args = ["-NoProfile", "-File", restartScript()];
-  if (machine) args.push("-Machine", machine);
-  const r = await exec(PS, args, { timeout: 600000 });
+  // from the Mac, the PC itself is the machine "desktop" = "this computer" for the script
+  const sm = IS_WIN ? machine : machine === PC ? "" : machine;
+  if (!IS_WIN && machine === "") return { res: { restarted: [], skipped: ["this Mac has no restart script"], busy: false }, err: "" };
+  const r = await psRun("herdr-restart.ps1", sm ? ["-Machine", sm] : [], { timeout: 600000 });
   const m = /RESULT (\{.*\})/.exec(r.stdout ?? "");
   let res = null;
   try { res = m ? JSON.parse(m[1]) : null; } catch {}
@@ -39,7 +51,7 @@ const bootFile = () => `${appHome()}/data/claude-restore/last-boot.txt`;
 // Each agent keeps one cat coat everywhere (list, tabs, pane header, yard): picked from its address.
 const COATS = ["ginger", "tuxedo", "black", "calico", "siamese", "gray", "white"];
 const coatOf = (addr) => { let h = 0; for (const ch of String(addr ?? "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return COATS[h % COATS.length]; };
-const CATS = "mods/mc-status/art/cats5";
+const CATS = "mods/mc-status/art/cats8";
 const ICONS = "mods/mc-status/art/icons";
 
 // ── limits ────────────────────────────────────────────────────────
@@ -95,7 +107,7 @@ function readLimit(key) {
 
 // ── restore ───────────────────────────────────────────────────────
 async function runScript(mode) {
-  const r = await exec(PS, ["-NoProfile", "-File", script(), "-Mode", mode], { timeout: 120000 });
+  const r = await psRun("herdr-restore.ps1", ["-Mode", mode], { timeout: 120000 });
   const m = /RESULT (\{.*\})/.exec(r.stdout ?? "");
   let res = null;
   try { res = m ? JSON.parse(m[1]) : null; } catch {}
@@ -103,6 +115,7 @@ async function runScript(mode) {
 }
 
 async function bootId() {
+  if (!IS_WIN) { const b = await exec("/bin/sh", ["-c", "sysctl -n kern.boottime"]).catch(() => null); return b?.code === 0 ? b.stdout.trim() : ""; }
   const r = await exec(PS, ["-NoProfile", "-Command",
     "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')"]).catch(() => null);
   return r?.code === 0 ? r.stdout.trim() : "";
@@ -168,6 +181,7 @@ export default class McStatus extends View {
   machines() {
     const set = new Set([""]);
     for (const t of terminals()) set.add(machineOf(t));
+    if (!IS_WIN) set.delete("");                      // the Mac itself has no Claude restart script
     return [...set];
   }
 
@@ -310,7 +324,13 @@ export default class McStatus extends View {
     const tip = [c.name, { working: "running around", idle: "checked — taking it easy", off: "asleep (session closed)", blocked: "brought you a gift — needs you", done: "done — XP collected" }[c.status] ?? c.status,
       c.model, c.ctx ? `ctx ${c.ctx}%` : null].filter(Boolean).join(" · ");
     const { anim, m, f } = this.pose(c, now);
-    const strip = `${CATS}/${coat}-${anim}.png`;
+    // Each cat keeps its own slight turn (±10°): lying strips have 10 variants (5 turns × mirrored),
+    // sitting ones 5 (the turns); the same turn index is used for both, so lying down starts where it sat.
+    const lv = (hashOf(c.key) >>> 5) % 10;
+    const vi = m.variants >= 10 ? lv : lv >> 1;
+    const strip = m.variants ? `${CATS}/${coat}-${anim}-${vi}.png` : `${CATS}/${coat}-${anim}.png`;
+    // a lying cat rests its body on the grass; the tail may hang into it (rows baked per variant, +3 so the belly settles into the grass)
+    const sink = m.sink ? m.sink[vi] + 3 : m.sinkF ? m.sinkF[vi][f] + 3 : 0;
     if (anim === "walk") {
       const [dx, fi] = m.seq[f];
       return div().absolute().left(x - m.span / 2).bottom(GROUND_H + lane).w(m.span).h(m.h)
@@ -319,7 +339,7 @@ export default class McStatus extends View {
           .on_click(() => run("pane.focus", { pane: c.pane })));
     }
     return frame(strip, m, f).when(c.status === "off", (el) => el.opacity(0.85))
-      .id(`cat-${c.key}`).absolute().left(x - m.w / 2).bottom(GROUND_H + lane).cursor_pointer()
+      .id(`cat-${c.key}`).absolute().left(x - m.w / 2).bottom(GROUND_H + lane - sink).cursor_pointer()
       .tooltip(tip)
       .on_click(() => (c.pane ? run("pane.focus", { pane: c.pane }) : run("pane.focus", { terminal: c.terminal })));
   }
@@ -420,7 +440,7 @@ export default class McStatus extends View {
     const ink = night ? "#d6dcf5" : "#ffffff";
 
     const W = this.yardW ?? 1600;
-    const RIGHT_W = 300, HOUSE_W = 70, HUD_W = 372;
+    const RIGHT_W = 200, HOUSE_W = 70, HUD_W = 372;
     const hud0 = W / 2 - HUD_W / 2 - 40, hud1 = W / 2 + HUD_W / 2 + 40;
     // fixed spots, sorted by session, spread over the yard left and right of the HUD
     const lo = HOUSE_W + 90, hi = Math.max(lo + 60, W - RIGHT_W - 90);
@@ -428,9 +448,12 @@ export default class McStatus extends View {
     const total = spans.reduce((n, [a, b]) => n + b - a, 0) || 1;
     const spotAt = (f) => { let d = f * total; for (const [a, b] of spans) { if (d <= b - a) return a + d; d -= b - a; } return hi; };
     const order = [...cats].sort((a, b) => String(a.key).localeCompare(String(b.key)));
+    // room per cat: the small per-cat offset shrinks when they stand close
+    const gap = total / Math.max(1, order.length);
+    const wob = Math.min(10, Math.floor(gap * 0.08));
     const placed = order.map((c, i) => {
       const h = hashOf(c.key);
-      return { c, x: spotAt((i + 0.5) / order.length) + ((h % 21) - 10) };
+      return { c, x: spotAt((i + 0.5) / order.length) + (wob ? (h % (2 * wob + 1)) - wob : 0) };
     });
 
     return div().id("mc-status").relative().size_full().overflow_hidden().text_size(11)
@@ -485,12 +508,17 @@ export default class McStatus extends View {
       .child(h_flex().id("hud-model").h(19).justify_center().tooltip(model ? `Model of the focused session: ${model}` : "No session focused")
         .when(Boolean(model), (el) => el.child(div().opacity(fresh ? 1 : 0.85).transition("opacity", { duration: 600 })
           .child(glowText(model, modelColor(model), 15)))))
-      .child(h_flex().justify_between().px(4).text_size(10.5)
-        .child(div().id("hud-7d").tooltip(health ? `7d limit (health): ${health.l.used}% used, ${health.left}% left · resets in ${fmtLeft(health.l.resets)}` : "7d limit: no data yet").child(caption(health, "7d", false)))
-        .child(div().id("hud-5h").tooltip(hunger ? `5h limit (hunger): ${hunger.l.used}% used, ${hunger.left}% left · resets in ${fmtLeft(hunger.l.resets)}` : "5h limit: no data yet").child(caption(hunger, "5h", true))))
+      // The 7d / 5h captions show only while the pointer is over their bar (coloured, as before).
+      .child(h_flex().h(14).justify_between().px(4).text_size(10.5)
+        .child(div().when(this.hoverLim === "7d", (el) => el.child(caption(health, "7d"))))
+        .child(div().when(this.hoverLim === "5h", (el) => el.child(caption(hunger, "5h")))))
       .child(div().relative().w_full().h(18)
-        .child(h_flex().absolute().left(4).top(0).children(health?.pips ?? []))
-        .child(h_flex().absolute().right(6).top(0).children(hunger?.pips ?? [])))
+        .child(h_flex().id("hud-7d").absolute().left(4).top(0).min_h(18).min_w(160)
+          .on_hover((on, cx) => { this.hoverLim = on ? "7d" : this.hoverLim === "7d" ? null : this.hoverLim; cx.notify(); })
+          .children(health?.pips ?? []))
+        .child(h_flex().id("hud-5h").absolute().right(6).top(0).min_h(18).min_w(160)
+          .on_hover((on, cx) => { this.hoverLim = on ? "5h" : this.hoverLim === "5h" ? null : this.hoverLim; cx.notify(); })
+          .children(hunger?.pips ?? [])))
       .child(div().id("hud-xp").relative().h(22).tooltip(xp == null ? "XP: context of the focused session (no data yet)" : `XP: the focused session has used ${xp}% of its context`)
         .child(div().absolute().left(4).bottom(0).w(364).h(10)
           .child(image(`${ICONS}/xpbar-bg.png`).w(364).h(10).absolute().left(0).top(0))
@@ -514,8 +542,22 @@ function lighten(hex, k) {
   const c = [0, 2, 4].map((i) => parseInt(n.slice(i, i + 2), 16));
   return "#" + c.map((v) => Math.round(v + (255 - v) * k).toString(16).padStart(2, "0")).join("");
 }
+// The statusline colour pushed to full saturation (same hue), so the name reads as a coloured item
+// name rather than near-white.
+function vivid(hex, sat = 1, light = 0.62) {
+  const n = hex.replace("#", "");
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(n.slice(i, i + 2), 16) / 255);
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d) h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  h = (h * 60 + 360) % 360;
+  const c = (1 - Math.abs(2 * light - 1)) * sat, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = light - c / 2;
+  const [R, G, B] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return "#" + [R, G, B].map((v) => Math.round((v + m) * 255).toString(16).padStart(2, "0")).join("");
+}
 function glowText(text, color, size) {
-  const bright = lighten(color, 0.35);
+  const bright = vivid(color, 0.7, 0.7);
+  color = vivid(color, 0.7, 0.6);
   const copy = (dx, dy, c) => div().absolute().left(dx).top(dy).whitespace_nowrap().text_color(c).child(text);
   const HALO = [[-2, 0], [2, 0], [0, -2], [0, 2], [-2, -2], [2, -2], [-2, 2], [2, 2], [-3, 0], [3, 0]];
   const spark = (left, top, delay) => div().absolute().left(left).top(top).size(2).bg("#ffffff")
@@ -574,7 +616,8 @@ function scenery(W, signW) {
   const span = W - signW;
   return div().absolute().left(0).top(0).size_full()
     .child(prop("oak", 66))
-    .child(prop("birch", span - 70))
+    // on a narrow window the birch would stand in the HUD: then leave it out
+    .when(span - 70 > W / 2 + 372 / 2 + 40, (el) => el.child(prop("birch", span - 70)))
     .child(prop("cane", POND_X - 14)).child(prop("cane", POND_X + 88));
 }
 

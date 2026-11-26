@@ -9,10 +9,18 @@
 #   done     : sits facing you, happy eyes, an XP orb bobbing beside it
 # The list icon (face.png) is a flat, front-on pixel face, drawn by hand below.
 import math, os
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
+
+# Lying cats come in variants so a row of them doesn't look stamped: the body turned a little
+# (yaw offsets, degrees) and each of those mirrored. Variant id = 2 * yaw index + mirrored.
+LIE_YAWS = [-10, -5, 0, 5, 10]
+LIE_VARIANTS = 2 * len(LIE_YAWS)
+# Sitting cats (idle, gift, done) get the same yaw offsets, unmirrored: variant id = yaw index.
+# The mod gives a cat the same yaw index sitting and lying, and its lie-down starts from that yaw.
+SIT_VARIANTS = len(LIE_YAWS)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "cats5")  # bump the folder name when sprites change: the app caches images by path
+OUT = os.path.join(HERE, "cats8")  # bump the folder name when sprites change: the app caches images by path
 os.makedirs(OUT, exist_ok=True)
 SS = 8
 
@@ -312,8 +320,15 @@ def crop_all(frames, pad=1, ground=None):
         b = f.getchannel("A").point(lambda a: 255 if a >= 128 else 0).getbbox()
         if b: box = b if box is None else (min(box[0], b[0]), min(box[1], b[1]), max(box[2], b[2]), max(box[3], b[3]))
     l, t, r, btm = box
+    global LAST_BTM; LAST_BTM = btm
     # the bottom is the lowest drawn pixel (paws), so the mod can stand the cat right on the grass
     return [f.crop((max(0, l - pad), max(0, t - pad), r + pad, btm)) for f in frames]
+
+LAST_BTM = 0
+def body_bottom(boxes, C, cam):
+    """Lowest drawn row of everything but the tail (uncropped canvas rows): where a lying cat rests."""
+    b = render([q for q in boxes if q.part != "tail"], C, cam).getchannel("A").point(lambda a: 255 if a >= 128 else 0).getbbox()
+    return b[3] if b else 0
 
 def px(im, pts, color):
     d = ImageDraw.Draw(im)
@@ -372,56 +387,81 @@ def build(C):
 
     # ── idle: sits facing you; tail swish, slow head tilt, one blink, one ear flick (24 frames)
     n = 48
-    idle = crop_all([render(pose_sit(tilt=5 * math.sin(2 * math.pi * i / n), ear=25 if i in (12, 13, 14) else 0,
-                                     tail_sw=22 * math.sin(4 * math.pi * i / n)), C, FRONT, "closed" if i in (30, 31, 32) else "open")
-                     for i in range(n)], ground=GROUND)
-    save_strip(os.path.join(OUT, f"{C}-idle.png"), idle)
-    META["idle"] = {"w": idle[0].width, "h": idle[0].height, "n": n}
+    idle_all = crop_all([render(pose_sit(tilt=5 * math.sin(2 * math.pi * i / n), ear=25 if i in (12, 13, 14) else 0,
+                                         tail_sw=22 * math.sin(4 * math.pi * i / n)), C, Cam(84 + d, 12, 3), "closed" if i in (30, 31, 32) else "open")
+                         for d in LIE_YAWS for i in range(n)], ground=GROUND)
+    for v in range(SIT_VARIANTS):
+        save_strip(os.path.join(OUT, f"{C}-idle-{v}.png"), idle_all[v * n:(v + 1) * n])
+    idle = idle_all[2 * n:3 * n]
+    META["idle"] = {"w": idle[0].width, "h": idle[0].height, "n": n, "variants": SIT_VARIANTS}
 
-    # ── off: sleeping loaf, breathing, z's rising (12 frames)
-    sl = crop_all([render(pose_lie(1.0, breath=0.3 * (0.5 - 0.5 * math.cos(2 * math.pi * i / 24)), drop=1.2, turn=52, tilt=-10, tail_sw=-25), C, Cam(32, 18, 3), "closed")
-                   for i in range(24)], ground=GROUND)
-    out = []
-    for i, f in enumerate(sl):
-        c = Image.new("RGBA", (f.width + 12, f.height + 18), (0, 0, 0, 0)); c.paste(f, (0, 18), f)
-        for k in range(3):
-            tt = ((i / 24) + k / 3) % 1.0
-            zx, zy = f.width - 6 + int(8 * tt), 16 - int(16 * tt)
-            if tt < 0.85:
-                big = 2 if tt > 0.35 else 1
-                px(c, [(zx + a * big + da, zy + b * big + db) for a, b in Z_GLYPH for da in range(big) for db in range(big)],
-                   "#ffffff" if tt < 0.6 else "#b8c6ea")
-        out.append(c)
-    save_strip(os.path.join(OUT, f"{C}-sleep.png"), out)
-    META["sleep"] = {"w": out[0].width, "h": out[0].height, "n": len(out)}
+    # ── off: sleeping loaf, breathing, z's rising (24 frames), in every lying variant
+    NS = 24
+    sl_specs = [(pose_lie(1.0, breath=0.3 * (0.5 - 0.5 * math.cos(2 * math.pi * i / NS)), drop=1.2, turn=52, tilt=-10, tail_sw=-25), Cam(32 + d, 18, 3))
+                for d in LIE_YAWS for i in range(NS)]
+    sl_all = crop_all([render(bx, C, cam, "closed") for bx, cam in sl_specs], ground=GROUND)
+    # how many rows the strip hangs below the body (the tail): the mod sinks it that far into the grass
+    sl_bot = [body_bottom(bx, C, cam) for bx, cam in sl_specs]
+    sl_sink = [LAST_BTM - min(sl_bot[k * NS:(k + 1) * NS], key=lambda v: -v) for k in range(len(LIE_YAWS))]
+    for v in range(LIE_VARIANTS):
+        sl, mir = sl_all[(v // 2) * NS:(v // 2 + 1) * NS], v % 2 == 1
+        out = []
+        for i, f in enumerate(sl):
+            c = Image.new("RGBA", (f.width + 12, f.height + 18), (0, 0, 0, 0))
+            c.paste(ImageOps.mirror(f) if mir else f, (12 if mir else 0, 18), ImageOps.mirror(f) if mir else f)
+            for k in range(3):
+                tt = ((i / NS) + k / 3) % 1.0
+                if tt < 0.85:
+                    big = 2 if tt > 0.35 else 1
+                    zx, zy = f.width - 6 + int(8 * tt), 16 - int(16 * tt)
+                    if mir: zx = c.width - zx - 3 * big      # the z's rise from the head, which is now on the left
+                    px(c, [(zx + a * big + da, zy + b * big + db) for a, b in Z_GLYPH for da in range(big) for db in range(big)],
+                       "#ffffff" if tt < 0.6 else "#b8c6ea")
+            out.append(c)
+        save_strip(os.path.join(OUT, f"{C}-sleep-{v}.png"), out)
+    META["sleep"] = {"w": out[0].width, "h": out[0].height, "n": NS, "variants": LIE_VARIANTS,
+                     "sink": [sl_sink[v // 2] for v in range(LIE_VARIANTS)]}
 
     # ── checked (idle a while): lies down once, then rests awake — blinks, tail flicks
     ld = crop_all([render(pose_lie(t), C, FRONT, "open") for t in (0.15, 0.35, 0.55, 0.75, 0.9, 1.0)]
                   + [render(pose_lie(1.0), C, FRONT, "open")], ground=GROUND)
     rest = ld[-1:]
-    rest_frames = []
-    for i in range(48):
-        rest_frames.append(render(pose_lie(1.0, turn=50, tilt=3 * math.sin(2 * math.pi * i / 48), ear=25 if i in (34, 35) else 0,
-                                           tail_sw=16 * math.sin(2 * math.pi * i / 24)), C, Cam(34, 18, 3), "closed" if i in (16, 17, 18) else "open"))
-    LIE = Cam(58, 16, 3)
-    both = crop_all([render(pose_lie(t, turn=50 * t), C, Cam(84 - 50 * t, 12 + 6 * t, 3), "open") for t in (0.15, 0.35, 0.55, 0.75, 0.9, 1.0)] + rest_frames, ground=GROUND)
-    save_strip(os.path.join(OUT, f"{C}-liedown.png"), both[:6])
-    save_strip(os.path.join(OUT, f"{C}-rest.png"), both[6:])
-    META["liedown"] = {"w": both[0].width, "h": both[0].height, "n": 6}
-    META["rest"] = {"w": both[0].width, "h": both[0].height, "n": 48}
+    frames, bots = [], []
+    for d in LIE_YAWS:
+        bots += [body_bottom(pose_lie(t, turn=50 * t), C, Cam(84 + d - 50 * t, 12 + 6 * t, 3)) for t in (0.15, 0.35, 0.55, 0.75, 0.9, 1.0)]
+        bots += [body_bottom(pose_lie(1.0, turn=50, tilt=3 * math.sin(2 * math.pi * i / 48)), C, Cam(34 + d, 18, 3)) for i in range(48)]      # per yaw: 6 lie-down frames (turning from facing you to the final yaw), then 48 resting
+        frames += [render(pose_lie(t, turn=50 * t), C, Cam(84 + d - 50 * t, 12 + 6 * t, 3), "open") for t in (0.15, 0.35, 0.55, 0.75, 0.9, 1.0)]
+        frames += [render(pose_lie(1.0, turn=50, tilt=3 * math.sin(2 * math.pi * i / 48), ear=25 if i in (34, 35) else 0,
+                                   tail_sw=16 * math.sin(2 * math.pi * i / 24)), C, Cam(34 + d, 18, 3), "closed" if i in (16, 17, 18) else "open")
+                   for i in range(48)]
+    allf = crop_all(frames, ground=GROUND)
+    ld_sink = [[LAST_BTM - b for b in bots[k * 54:k * 54 + 6]] for k in range(len(LIE_YAWS))]      # per lie-down frame
+    rs_sink = [LAST_BTM - max(bots[k * 54 + 6:(k + 1) * 54]) for k in range(len(LIE_YAWS))]
+    for v in range(LIE_VARIANTS):
+        both = allf[(v // 2) * 54:(v // 2 + 1) * 54]
+        if v % 2: both = [ImageOps.mirror(f) for f in both]
+        save_strip(os.path.join(OUT, f"{C}-liedown-{v}.png"), both[:6])
+        save_strip(os.path.join(OUT, f"{C}-rest-{v}.png"), both[6:])
+    META["liedown"] = {"w": both[0].width, "h": both[0].height, "n": 6, "variants": LIE_VARIANTS,
+                       "sinkF": [ld_sink[v // 2] for v in range(LIE_VARIANTS)]}
+    META["rest"] = {"w": both[0].width, "h": both[0].height, "n": 48, "variants": LIE_VARIANTS,
+                    "sink": [rs_sink[v // 2] for v in range(LIE_VARIANTS)]}
 
     # ── blocked: behind a gift, looking up at you (16 frames)
-    gf = crop_all([render(pose_sit(tilt=-7 * math.sin(2 * math.pi * i / 32), tail_sw=30 * math.sin(4 * math.pi * i / 32), head_dy=0.3)
-                          + gift(0.4 if i in (8, 9, 24, 25) else 0.0), C, FRONT, "open") for i in range(32)], ground=GROUND)
-    save_strip(os.path.join(OUT, f"{C}-gift.png"), gf)
-    META["gift"] = {"w": gf[0].width, "h": gf[0].height, "n": 32}
+    gf_all = crop_all([render(pose_sit(tilt=-7 * math.sin(2 * math.pi * i / 32), tail_sw=30 * math.sin(4 * math.pi * i / 32), head_dy=0.3)
+                              + gift(0.4 if i in (8, 9, 24, 25) else 0.0), C, Cam(84 + d, 12, 3), "open") for d in LIE_YAWS for i in range(32)], ground=GROUND)
+    for v in range(SIT_VARIANTS):
+        save_strip(os.path.join(OUT, f"{C}-gift-{v}.png"), gf_all[v * 32:(v + 1) * 32])
+    gf = gf_all[64:96]
+    META["gift"] = {"w": gf[0].width, "h": gf[0].height, "n": 32, "variants": SIT_VARIANTS}
 
     # ── done: happy eyes, an XP orb bobbing right above the head (16 frames)
     full, heads = [], []
-    for i in range(32):
-        bx = pose_sit(tilt=4 * math.sin(2 * math.pi * i / 32), tail_sw=14 * math.sin(2 * math.pi * i / 32))
-        full.append(render(bx, C, FRONT, "happy" if (i // 8) % 2 == 0 else "open"))
-        heads.append(render([q for q in bx if q.part in ("head", "muzzle", "ear")], C, FRONT))
+    for d in LIE_YAWS:
+        for i in range(32):
+            bx = pose_sit(tilt=4 * math.sin(2 * math.pi * i / 32), tail_sw=14 * math.sin(2 * math.pi * i / 32))
+            full.append(render(bx, C, Cam(84 + d, 12, 3), "happy" if (i // 8) % 2 == 0 else "open"))
+            heads.append(render([q for q in bx if q.part in ("head", "muzzle", "ear")], C, Cam(84 + d, 12, 3)))
     box = None
     for f in full:
         bb = f.getchannel("A").point(lambda a: 255 if a >= 128 else 0).getbbox()
@@ -434,11 +474,13 @@ def build(C):
         c = Image.new("RGBA", (r - l, btm - t + TOP), (0, 0, 0, 0))
         c.paste(f.crop((l, t, r, btm)), (0, TOP))
         cxh = (hb[0] + hb[2]) // 2 - l
-        y = (hb[1] - t + TOP) - 22 + round(2 * math.sin(2 * math.pi * i / 32))
-        orb(c, cxh - 10, y, i)
+        y = (hb[1] - t + TOP) - 22 + round(2 * math.sin(2 * math.pi * (i % 32) / 32))
+        orb(c, cxh - 10, y, i % 32)
         out2.append(c)
-    save_strip(os.path.join(OUT, f"{C}-done.png"), out2)
-    META["done"] = {"w": out2[0].width, "h": out2[0].height, "n": 32}
+    for v in range(SIT_VARIANTS):
+        save_strip(os.path.join(OUT, f"{C}-done-{v}.png"), out2[v * 32:(v + 1) * 32])
+    out2 = out2[64:96]
+    META["done"] = {"w": out2[0].width, "h": out2[0].height, "n": 32, "variants": SIT_VARIANTS}
 
     face = face_icon(C)
     face.save(os.path.join(OUT, f"{C}-face.png"))
